@@ -27,15 +27,56 @@ class TagFiltersController < ApplicationController
 
   def create
     filter_type = params[:filter_type].constantize
+    name_delimiter = @hub.tags_delimiter_with_default
+    errors = []
+
+    # authorize before any action
+    dummy_filter_to_auth = filter_type.new
+    dummy_filter_to_auth.hub = @hub
+    authorize dummy_filter_to_auth
+
     unless params[:tag_id].blank?
       @tag = ActsAsTaggableOn::Tag.find(params[:tag_id])
     end
 
-    if params[:filter_type] == 'ModifyTagFilter'
-      @tag ||= find_or_create_tag_by_name(params[:modify_tag])
-      @new_tag = find_or_create_tag_by_name(params[:new_tag])
+    if @tag
+      result = create_single(@tag, filter_type)
+
+      errors << result[:errors] unless result[:errors].empty?
     else
-      @tag ||= find_or_create_tag_by_name(params[:new_tag])
+      tag_name = if params[:filter_type] == 'ModifyTagFilter'
+                   params[:modify_tag]
+                 else
+                   params[:new_tag]
+                 end
+
+      tag_name.split(name_delimiter).each do |single_tag_name|
+        single_tag_name = ActsAsTaggableOn::Tag.normalize_name(single_tag_name)
+        single_tag = find_or_create_tag_by_name(single_tag_name)
+
+        result = create_single(single_tag, filter_type)
+
+        errors << result[:errors] unless result[:errors].empty?
+      end
+    end
+
+    if errors.empty?
+      render plain: %(Added a filter for that tag to "#{@scope.title}"),
+             layout: !request.xhr?
+    else
+      flash[:error] = 'Could not add that tag filter.'
+      render html: errors.join('<br/>'),
+             status: :not_acceptable,
+             layout: !request.xhr?
+    end
+  end
+
+  def create_single(tag, filter_type)
+    errors = []
+    @tag = tag
+
+    if params[:filter_type] == 'ModifyTagFilter'
+      @new_tag = find_or_create_tag_by_name(params[:new_tag])
     end
 
     @tag_filter = filter_type.new
@@ -43,8 +84,6 @@ class TagFiltersController < ApplicationController
     @tag_filter.scope = @scope
     @tag_filter.tag = @tag
     @tag_filter.new_tag = @new_tag if @new_tag
-
-    authorize @tag_filter
 
     if @tag_filter.save
       current_user.has_role!(:owner, @tag_filter)
@@ -77,15 +116,13 @@ class TagFiltersController < ApplicationController
       end
 
       @tag_filter.apply_async
-
-      render plain: %(Added a filter for that tag to "#{@scope.title}"),
-             layout: !request.xhr?
     else
-      flash[:error] = 'Could not add that tag filter.'
-      render html: @tag_filter.errors.full_messages.join('<br/>'),
-             status: :not_acceptable,
-             layout: !request.xhr?
+      errors = @tag_filter.errors.full_messages.join('<br/>')
     end
+
+    {
+      errors: errors
+    }
   end
 
   def destroy
